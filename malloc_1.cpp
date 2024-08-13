@@ -23,6 +23,8 @@ void* smalloc(size_t size){
 int main() {
     int i = 1000;
     void* ptr = smalloc(i);
+    void* ptrFAIL1 = smalloc(MAX_SIZE+10);
+    void *ptrFAIL2 = smalloc(0);
     if (ptr == nullptr) {
         return 1;
     }
@@ -36,6 +38,26 @@ int main() {
     if (y == z) { //make sure value changed
         return 2;
     }
+
+    //try allocating a bunch of new blocks
+    for (int q = 3; q < 10; q++) {
+        void* ptr = smalloc(MAX_SIZE-1000);
+        if (ptr == nullptr) {
+            return q;
+        }
+    }
+    //try allocating a bunch of new blocks and write into them
+    for (int r = 11; r < 100000; r++) {
+        void* ptr3 = smalloc(MAX_SIZE-1000);
+        if (ptr3 == nullptr) {
+            return r;
+        }
+        int *new_arr = (int*)ptr3;
+        //write into arr
+        new_arr[10000] = 1;
+    }
+
+
     return 0;
 }
 */
