@@ -15,3 +15,15 @@ void* smalloc(size_t size){
     }
     return alloc_ptr; //TODO - does this return the first allocated bit as desired or the last bit from previous block??
 }
+
+//--------------------------------
+//FOR TEST
+//--------------------------------
+int main() {
+    int i = 1000;
+    void* ptr = smalloc(i);
+    if (ptr == NULL) {
+        return 1;
+    }
+    return 0;
+}
