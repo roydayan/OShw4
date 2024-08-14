@@ -7,8 +7,6 @@
 #define MAX_SIZE 100000000  //10^8
 
 
-// TODO - IMPORTANT NOTE 2 in pdf - keep SORTED LIST of the allocations in system
-
 
 struct MallocMetadata {
     size_t size;
@@ -51,17 +49,23 @@ void* smalloc(size_t size) {
     new_block->is_free = false;
 
     //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
-    curr = head; //head is "bottom of heap"
-    while (curr) {
-        //if we reached last block, attach new block to end
-        if (curr->next == nullptr) {
-            curr->next = new_block;
-            new_block->prev = curr;
-            new_block->next = nullptr;
-            break;
-        }
-        curr = curr->next;
+    if (head == nullptr) {
+        head = new_block;
+        new_block->prev = nullptr;
     }
+    else {
+        curr = head; //head is "bottom of heap"
+        while (curr) {
+            //if we reached last block, attach new block to end
+            if (curr->next == nullptr) {
+                curr->next = new_block;
+                new_block->prev = curr;
+                break;
+            }
+            curr = curr->next;
+        }
+    }
+    new_block->next = nullptr;
 
     return (void*)(new_block + 1);
     // note: adding one advances the ptr by sizeof(metadata) b/c new_block is a pointer to metadata

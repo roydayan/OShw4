@@ -8,73 +8,115 @@
 #include <unistd.h>
 #include <cstring> //for memmove
 #define MAX_SIZE 100000000  //10^8
-
-
+#define MAX_ORDER 10
+#define INIT_ALLOC (128*1024*32) //128KB * 32 = 4MB
+#define INIT_NUM_BLOCKS 32
+//#define INIT_BLOCK_SIZE 128*1024 //128KB
+#define BLOCK_SIZE(order) (1 << (order + 7))    // 128 bytes for order 0
+//#define MAX_BLOCK_SIZE BLOCK_SIZE(MAX_ORDER) // 128KB for order 10
 
 //TODO- implement malloc_3 - this is copy of malloc_2!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-// TODO - IMPORTANT NOTE 2 in pdf - keep SORTED LIST of the allocations in system
-
-
-
-
-struct MallocMetadata {
+typedef struct MallocMetadata {
     size_t size;
     bool is_free;
     MallocMetadata* next;
     MallocMetadata* prev;
+} * Meta;
+
+class Block_Table {
+private:
+    Meta table[MAX_ORDER+1] = {nullptr}; //array of linked lists
+public:
+    Block_Table() : table() {};
 };
 
-MallocMetadata* head = nullptr;
 
+
+Meta free_table[MAX_ORDER+1]; //array of linked lists
+
+//initialize memory to be aligned for easy buddy finding
+void init_memory() {
+    //align memory to 4MB
+    size_t base = (size_t)sbrk(0);   //get current program break
+    size_t remainder = base % INIT_ALLOC;
+    if (remainder != 0) {
+        sbrk(INIT_ALLOC - remainder);
+    }
+    /*
+    FOR TEST : ensure aligned   TODO - remove!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    if ((size_t)sbrk(0) % INIT_ALLOC != 0) {
+        throw;
+        return; //sbrk failed
+    }
+    */
+    //allocate 4MB - I prefer allocating once rather than for every block
+    void* memory_start = sbrk(INIT_ALLOC);
+    if (memory_start == (void*)(-1)) {
+        return; //sbrk failed
+    }
+    size_t index = (size_t)memory_start;
+    for (int i = 0; i < INIT_NUM_BLOCKS; i++) {
+        Meta new_block = (Meta)index;
+        new_block->size = BLOCK_SIZE(MAX_ORDER);
+        new_block->is_free = true;
+        new_block->next = nullptr;
+        new_block->prev = nullptr;
+        //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
+        if (free_table[MAX_ORDER] == nullptr) {
+            free_table[MAX_ORDER] = new_block;
+        }
+        else {
+            Meta curr = free_table[MAX_ORDER]; //head is "bottom of heap"
+            while (curr) {
+                //if we reached last block, attach new block to end
+                if (curr->next == nullptr) {
+                    curr->next = new_block;
+                    new_block->prev = curr;
+                    break;
+                }
+                curr = curr->next;
+            }
+        }
+        index += BLOCK_SIZE(MAX_ORDER);
+    }
+}
+
+
+void* findBlockGivenOrder(int order);
+void* recurseSplitAlloc(size_t size, int order);
+void* largeAlloc(size_t size);
 
 
 void* smalloc(size_t size) {
-    if (size == 0 || size > MAX_SIZE) {
+    if (size == 0) {
         return nullptr; //Note - this is .cpp file, so I am using nullptr instead of NULL
     }
-
-    MallocMetadata* curr = head;
-
-    // Search for a pre-existing suitable free block
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            curr->is_free = false;
-            return (void*)(curr + 1);
-            // return pointer after the metadata (cast it back to void* b/c it was cast to MallocMetadata* in creation)
-            // note: adding one advances the ptr by sizeof(metadata) b/c curr is a pointer to metadata
+    if (size >= BLOCK_SIZE(MAX_ORDER)) {
+        return largeAlloc(size);
+    }
+    int order = 0;
+    while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < size && order <= MAX_ORDER) {
+        order++;
+    }
+    if (order > MAX_ORDER) {
+        return nullptr; // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeAlloc will be called
+    }
+    // check if there is a free block of the right size (no need to split) allocate as before
+    if (free_table[order]) {
+        return findBlockGivenOrder(order);
+    }
+    else { //no free block of right size
+        // Find the tightest fit block
+        for (int current_order = order + 1; current_order <= MAX_ORDER; current_order++) {
+            if (free_table[current_order]) {
+                return recurseSplitAlloc(size, current_order);
+            }
         }
-        curr = curr->next;
     }
-
-    // No suitable block found, allocate a new one
-    void* block_start = sbrk(static_cast<intptr_t>(size + sizeof(MallocMetadata))); //TODO - should I not use cast?? or use C-style cast?? sbrk((intptr_t)size);
-    if (block_start == (void*)(-1)) {
-        return nullptr; //sbrk failed
-    }
-
-    //update metadata of new block
-    MallocMetadata* new_block;
-    new_block = (MallocMetadata*)block_start;
-    new_block->size = size;
-    new_block->is_free = false;
-
-    //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
-    curr = head; //head is "bottom of heap"
-    while (curr) {
-        //if we reached last block, attach new block to end
-        if (curr->next == nullptr) {
-            curr->next = new_block;
-            new_block->prev = curr;
-            new_block->next = nullptr;
-            break;
-        }
-        curr = curr->next;
-    }
-
-    return (void*)(new_block + 1);
-    // note: adding one advances the ptr by sizeof(metadata) b/c new_block is a pointer to metadata
+    return nullptr;
 }
+
 
 
 void* scalloc(size_t num, size_t size) {
@@ -100,7 +142,7 @@ void sfree(void* p) {
     }
 
     // cast and decrement to get to metadata
-    MallocMetadata* block = (MallocMetadata*)p - 1;
+    Meta block = (Meta)p - 1;
     block->is_free = true;
 }
 
@@ -115,7 +157,7 @@ void* srealloc(void* oldp, size_t size) {
         return smalloc(size);
     }
 
-    MallocMetadata* old_block = (MallocMetadata*)oldp - 1;
+    Meta old_block = (Meta)oldp - 1;
     if (old_block->size >= size) {
         return oldp;
     }
@@ -134,127 +176,49 @@ void* srealloc(void* oldp, size_t size) {
 }
 
 
-//--------------------------------------------------------------------------------
-//Stats Methods
-//--------------------------------------------------------------------------------
 
-size_t _num_free_blocks() {
-    size_t count = 0;
-    MallocMetadata* curr = head;
+
+void* findBlockGivenOrder(int order) {
+    Meta curr = free_table[order];
     while (curr) {
         if (curr->is_free) {
-            count++;
+            curr->is_free = false;
+            break;
         }
         curr = curr->next;
     }
-    return count;
+    //remove block from free_table
+    if (curr->prev) {
+        curr->prev->next = curr->next;
+    }
+    if (curr->next) {
+        curr->next->prev = curr->prev;
+    }
+    if (free_table[order] == curr) {
+        free_table[order] = curr->next;
+    }
+    return (void*)(curr + 1);
 }
 
-size_t _num_free_bytes() {
-    size_t count = 0;
-    MallocMetadata* curr = head;
-    while (curr) {
-        if (curr->is_free) {
-            count += curr->size;
+void* recurseSplitAlloc(size_t size, int order) {
+        Meta curr = free_table[order];
+        while (curr) {
+            if (curr->is_free) {
+                curr->is_free = false;
+                size_t new_block_size = BLOCK_SIZE(order);
+
+                //TODO - split!!!!
+            }
         }
-        curr = curr->next;
-    }
-    return count;
-}
-
-size_t _num_allocated_blocks() {
-    size_t count = 0;
-    MallocMetadata* curr = head;
-    while (curr) {
-        count++;
-        curr = curr->next;
-    }
-    return count;
-}
-
-size_t _num_allocated_bytes() {
-    size_t count = 0;
-    MallocMetadata* curr = head;
-    while (curr) {
-        count += curr->size;
-        curr = curr->next;
-    }
-    return count;
-}
-
-size_t _num_meta_data_bytes() {
-    return _num_allocated_blocks() * sizeof(MallocMetadata);
-}
-
-size_t _size_meta_data() {
-    return sizeof(MallocMetadata);
-}
-
-/*
-//--------------------------------------------------------------------------------
-//FOR TEST
-//--------------------------------------------------------------------------------
-int main() {
-    int i = 1000;
-    void* ptr = smalloc(i);
-    void* ptrFAIL1 = smalloc(MAX_SIZE+10);
-    void *ptrFAIL2 = smalloc(0);
-    if (ptr == nullptr) {
-        return 1;
-    }
-    int *int_arr = (int*)ptr;
-    int x = int_arr[0];
-    int y = int_arr[i-1];
-    for (int j = 0; j < i; j++) {
-        int_arr[j] = j;
-    }
-    int z = int_arr[i-1];
-    if (y == z) { //make sure value changed
-        return 2;
-    }
-
-    //try allocating a bunch of new blocks
-    for (int q = 3; q < 10; q++) {
-        void* ptr1 = smalloc(MAX_SIZE-1000);
-        if (ptr1 == nullptr) {
-            return q;
+        //remove block from free_table
+        if (curr->prev) {
+            curr->prev->next = curr->next;
         }
-    }
-    //try allocating a bunch of new blocks and write into them
-    for (int r = 11; r < 1000; r++) {
-        void* ptr3 = smalloc(MAX_SIZE-1000);
-        if (ptr3 == nullptr) {
-            return r;
+        if (curr->next) {
+            curr->next->prev = curr->prev;
         }
-        int *new_arr = (int*)ptr3;
-        //write into arr
-        new_arr[10000] = 1;
-    }
-
-    //test calloc
-    void* ptr4 = scalloc(100, sizeof(int));
-    if (ptr4 == nullptr) {
-        return 100;
-    }
-    int* int_arr2 = (int*)ptr4;
-    for (int j = 0; j < 100; j++) {
-        if (int_arr2[j] != 0) {
-            return 101;
+        if (free_table[order] == curr) {
+            free_table[order] = curr->next;
         }
-    }
 
-    //test realloc
-    void* ptr5 = srealloc(ptr4, 1000*sizeof(int));
-    if (ptr5 == nullptr) {
-        return 102;
-    }
-    int* int_arr3 = (int*)ptr5;
-    for (int j = 0; j < 100; j++) {
-        if (int_arr3[j] != 0) {
-            return 103;
-        }
-    }
-
-    return 0;
-}
- */
+};
