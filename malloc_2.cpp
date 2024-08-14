@@ -10,8 +10,6 @@
 // TODO - IMPORTANT NOTE 2 in pdf - keep SORTED LIST of the allocations in system
 
 
-
-
 struct MallocMetadata {
     size_t size;
     bool is_free;
@@ -20,7 +18,6 @@ struct MallocMetadata {
 };
 
 MallocMetadata* head = nullptr;
-
 
 
 void* smalloc(size_t size) {
@@ -52,15 +49,19 @@ void* smalloc(size_t size) {
     new_block = (MallocMetadata*)block_start;
     new_block->size = size;
     new_block->is_free = false;
-    new_block->next = head;
-    new_block->prev = nullptr;
 
-    //insert new block into head of list
-    if (head) {
-        head->prev = new_block;
+    //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
+    curr = head; //head is "bottom of heap"
+    while (curr) {
+        //if we reached last block, attach new block to end
+        if (curr->next == nullptr) {
+            curr->next = new_block;
+            new_block->prev = curr;
+            new_block->next = nullptr;
+            break;
+        }
+        curr = curr->next;
     }
-
-    head = new_block;
 
     return (void*)(new_block + 1);
     // note: adding one advances the ptr by sizeof(metadata) b/c new_block is a pointer to metadata
