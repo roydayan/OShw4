@@ -126,42 +126,9 @@ void* srealloc(void* oldp, size_t size) {
 
 
 
-
-
-/*
-void* smalloc(size_t size) {
-    if (size == 0) {
-        return nullptr; //Note - this is .cpp file, so I am using nullptr instead of NULL
-    }
-    if (size >= BLOCK_SIZE(MAX_ORDER)) {
-        return largeAlloc(size);
-    }
-    int order = 0;
-    while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < size && order <= MAX_ORDER) {
-        order++;
-    }
-    if (order > MAX_ORDER) {
-        return nullptr; // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeAlloc will be called
-    }
-    // check if there is a free block of the right size (no need to split) allocate as before
-    if (free_table[order]) {
-        return findBlockGivenOrder(order);
-    }
-    else { //no free block of right size
-        // Find the tightest fit block
-        for (int current_order = order + 1; current_order <= MAX_ORDER; current_order++) {
-            if (table[current_order]) {
-                return recurseSplitAlloc(size, current_order);
-            }
-        }
-    }
-    return nullptr;
-}
-*/
-
-
-
-
+//-------------------------------------------------------------
+//Block_Table methods
+//-------------------------------------------------------------
 
 //initialize memory to be aligned for easy buddy finding
 void Block_Table::initTable() {
