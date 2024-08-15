@@ -42,14 +42,17 @@ public:
     void* findBlockGivenOrder(int order); //TODO - EASY, check addresses when finding place in list
     void* recurseSplitAlloc(size_t size, int order);
     void freeBlock(Meta block);
-    void recurseSplitFree(Meta block);
-    //bool checkBuddies(Meta block1, Meta block2);
-    //Meta mergeBuddies(Meta block1, Meta block2);
-    //Meta splitBlock(Meta block, int order);
+    void recurseMergeFree(Meta block, int order);
+
+    //un-implemented helper funcs:
+    void insertBlockIntoTable(Meta block, int order); //inserts block list corresponding to order
+    bool checkRightBuddy(Meta block);
+    bool checkLeftBuddy(Meta block);
+    Meta mergeBuddies(Meta block1, Meta block2);
 };
 
 void* largeAlloc(size_t size);
-void largeFree(void* p);
+void largeFree(Meta block);
 
 
 
@@ -86,11 +89,10 @@ void sfree(void* p) {
     if (!p) {
         return;
     }
-
     // cast and decrement to get to metadata
     Meta block = (Meta)p - 1;
     if (block->size >= BLOCK_SIZE(MAX_ORDER)) {
-        largeFree(p);
+        largeFree(block);
     }
     block_table.freeBlock(block);
 }
@@ -254,7 +256,52 @@ void* Block_Table::recurseSplitAlloc(size_t size, int order) {
 }
 
 
+void Block_Table::freeBlock(Meta block) {
+    // assumes not nullptr
+    int order = 0;
+    while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < block->size && order <= MAX_ORDER) {
+        order++;
+    }
+    if (order > MAX_ORDER) {
+        largeFree(block); // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeFree will be called
+        return;
+    }
+    recurseMergeFree(block, order);
+}
 
+
+void Block_Table::recurseMergeFree(Meta block, int order) {
+    insertBlockIntoTable(block, order);
+    if (order == MAX_ORDER) { //no merging in max order
+        return;
+    }
+    else if (checkLeftBuddy (block)) {
+        Meta mergedBlock = mergeBuddies(block->prev, block);
+        recurseMergeFree(mergedBlock, order + 1);
+    }
+    if (checkRightBuddy (block)) {
+        Meta mergedBlock = mergeBuddies(block, block->next);
+        recurseMergeFree(mergedBlock, order + 1);
+    }
+}
+
+
+Meta Block_Table::mergeBuddies(Meta block1, Meta block2) { //block 1 is prev of 2
+    //assumes blocks are not nullptr
+    Meta new_block = block1; //prev and is_free are already supposed to be set
+    new_block->size = block1->size * 2;
+    new_block->is_free = true;
+    new_block->next = block2->next;
+    if (block2->next) {
+        block2->next->prev = new_block;
+    }
+    new_block->prev = block1->prev;
+    if (block1->prev) {
+        block1->prev->next = new_block;
+    }
+    //TODO - ensure that not changing block2 is okay!!
+    return new_block;
+}
 
 
 
