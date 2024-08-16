@@ -42,13 +42,13 @@ public:
 
 
     void* getAvailableBlock(size_t size);
-    void* findBlockGivenOrder(int order); //TODO - EASY, check addresses when finding place in list
+    void* findBlockGivenOrder(int order);
     void* recurseSplitAlloc(size_t size, int order);
     void freeBlock(Meta block);
     void recurseMergeFree(Meta block, int order);
 
     //helper funcs:
-    void insertBlockIntoList(Meta block, int order); //inserts block list corresponding to order
+    void insertBlockIntoList(Meta block, int order); //inserts block into list corresponding to order
     bool checkPrevBuddy(Meta block, int order);
     bool checkNextBuddy(Meta block, int order);
     Meta mergeRemoveBuddies(Meta block1, Meta block2);
@@ -428,3 +428,8 @@ void Block_Table::removeLargeBlock(Meta block) {
 }
 
 
+int main() {
+    block_table.initTable();
+    int* ptr = (int*)smalloc(1000);
+    return 0;
+}
