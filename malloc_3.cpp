@@ -7,6 +7,7 @@
 
 #include <unistd.h>
 #include <cstring> //for memmove
+#include <sys/mman.h> //for mmap
 #define MAX_SIZE 100000000  //10^8
 #define MAX_ORDER 10
 #define INIT_ALLOC (128*1024*32) //128KB * 32 = 4MB
@@ -32,6 +33,8 @@ private:
     Meta table[MAX_ORDER+1] = {nullptr}; //array of linked lists
     bool isInitialized = false;
 
+    Meta mmap_head = nullptr;
+
 public:
 
     Block_Table() : table() {};
@@ -44,11 +47,15 @@ public:
     void freeBlock(Meta block);
     void recurseMergeFree(Meta block, int order);
 
-    //un-implemented helper funcs:
-    void insertBlockIntoTable(Meta block, int order); //inserts block list corresponding to order
-    bool checkRightBuddy(Meta block);
-    bool checkLeftBuddy(Meta block);
-    Meta mergeBuddies(Meta block1, Meta block2);
+    //helper funcs:
+    void insertBlockIntoList(Meta block, int order); //inserts block list corresponding to order
+    bool checkPrevBuddy(Meta block, int order);
+    bool checkNextBuddy(Meta block, int order);
+    Meta mergeRemoveBuddies(Meta block1, Meta block2);
+
+    //large block methods
+    void addLargeBlock(Meta block);
+    void removeLargeBlock(Meta block);
 };
 
 void* largeAlloc(size_t size);
@@ -63,7 +70,7 @@ void* smalloc(size_t size) {
     if (size == 0) {
         return nullptr; //Note - this is .cpp file, so I am using nullptr instead of NULL
     }
-    if (size >= BLOCK_SIZE(MAX_ORDER)) {
+    if (size + sizeof(MallocMetadata) >= BLOCK_SIZE(MAX_ORDER)) {
         return largeAlloc(size);
     }
     return block_table.getAvailableBlock(size);
@@ -91,7 +98,7 @@ void sfree(void* p) {
     }
     // cast and decrement to get to metadata
     Meta block = (Meta)p - 1;
-    if (block->size >= BLOCK_SIZE(MAX_ORDER)) {
+    if ((block->size + sizeof(MallocMetadata)) >= BLOCK_SIZE(MAX_ORDER)) {
         largeFree(block);
     }
     block_table.freeBlock(block);
@@ -189,7 +196,7 @@ void* Block_Table::getAvailableBlock(size_t size) {
         order++;
     }
     if (order > MAX_ORDER) {
-        return nullptr; // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeAlloc will be called
+        return nullptr; // Note: not supposed to reach this b/c if size >= BLOCK_SIZE(MAX_ORDER), largeAlloc will be called
     }
     // check if there is a free block of the right size (no need to split) allocate as before
     if (table[order]) {
@@ -206,12 +213,14 @@ void* Block_Table::getAvailableBlock(size_t size) {
     return nullptr;
 }
 
+
 void* Block_Table::findBlockGivenOrder(int order) {
     Meta curr = table[order];
     while (curr) {
         if (curr->is_free) {
             curr->is_free = false;
             break;
+            //TODO - should we check free or just return the first non-null block??????????
         }
         curr = curr->next;
     }
@@ -257,51 +266,165 @@ void* Block_Table::recurseSplitAlloc(size_t size, int order) {
 
 
 void Block_Table::freeBlock(Meta block) {
-    // assumes not nullptr
+    // assumes not nullptr. size < BLOCK_SIZE(MAX_ORDER) b/c large blocks are handled separately
     int order = 0;
-    while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < block->size && order <= MAX_ORDER) {
+    while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < block->size) {
         order++;
-    }
-    if (order > MAX_ORDER) {
-        largeFree(block); // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeFree will be called
-        return;
     }
     recurseMergeFree(block, order);
 }
 
 
 void Block_Table::recurseMergeFree(Meta block, int order) {
-    insertBlockIntoTable(block, order);
+    insertBlockIntoList(block, order);
     if (order == MAX_ORDER) { //no merging in max order
         return;
     }
-    else if (checkLeftBuddy (block)) {
-        Meta mergedBlock = mergeBuddies(block->prev, block);
+    else if (checkPrevBuddy (block, order)) {
+        Meta mergedBlock = mergeRemoveBuddies(block->prev, block);
         recurseMergeFree(mergedBlock, order + 1);
     }
-    if (checkRightBuddy (block)) {
-        Meta mergedBlock = mergeBuddies(block, block->next);
+    else if (checkNextBuddy (block, order)) {
+        Meta mergedBlock = mergeRemoveBuddies(block, block->next);
         recurseMergeFree(mergedBlock, order + 1);
     }
 }
 
 
-Meta Block_Table::mergeBuddies(Meta block1, Meta block2) { //block 1 is prev of 2
+void Block_Table::insertBlockIntoList(Meta block, int order) {
+    //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
+    if (table[order] == nullptr) {
+        table[order] = block;
+        block->prev = nullptr;
+        block->next = nullptr;
+    }
+    else if (block < table[order]) { //insert at beginning
+        block->next = table[order];
+        block->prev = nullptr;
+        table[order]->prev = block;
+        table[order] = block;
+    }
+    else { //search place in list
+        Meta curr = table[order]->next;
+        while (curr) {
+            //insert if block has lower address
+            if (block < curr) {
+                block->next = curr;
+                block->prev = curr->prev;
+                curr->prev->next = block; // curr->prev != nullptr b/c we checked the head of list (table[order])
+                curr->prev = block;
+                break;
+            }
+            //if we reached last block, attach new block to end
+            else if (curr->next == nullptr) {
+                curr->next = block;
+                block->prev = curr;
+                break;
+            }
+            curr = curr->next;
+        }
+    }
+}
+
+
+bool Block_Table::checkPrevBuddy(Meta block, int order) {
+    // assumes block is not nullptr
+    // trick: buddy address = block address XOR block size
+    Meta buddy = (Meta)((size_t)block ^ BLOCK_SIZE(order));
+    //TODO - ensure buddy is free? I'm counting on valid updates of next and prev fields
+    if ((block->prev != nullptr) && (block->prev == buddy)) {
+        return true;
+    }
+    return false;
+}
+
+bool Block_Table::checkNextBuddy(Meta block, int order) {
+    // assumes block is not nullptr
+    // trick: buddy address = block address XOR block size
+    Meta buddy = (Meta)((size_t)block ^ BLOCK_SIZE(order));
+    if ((block->next != nullptr) && (block->next == buddy)) {
+        return true;
+    }
+    return false;
+}
+
+
+Meta Block_Table::mergeRemoveBuddies(Meta block1, Meta block2) { //block 1 is prev of 2
     //assumes blocks are not nullptr
     Meta new_block = block1; //prev and is_free are already supposed to be set
-    new_block->size = block1->size * 2;
-    new_block->is_free = true;
-    new_block->next = block2->next;
+    //new_block->size = (block1->size * 2); //size should still be 0 in free block
+    //new_block->is_free = true;
+    new_block->next = nullptr;
+    new_block->prev = nullptr;
+
+    //remove merged block from list
     if (block2->next) {
-        block2->next->prev = new_block;
+        block2->next->prev = block1->prev;
     }
-    new_block->prev = block1->prev;
     if (block1->prev) {
-        block1->prev->next = new_block;
+        block1->prev->next = block2->next;
     }
-    //TODO - ensure that not changing block2 is okay!!
+
     return new_block;
 }
 
+
+//-------------------------------------------------------------
+//large block methods
+//-------------------------------------------------------------
+
+void* largeAlloc(size_t size) {
+    // use mmap to allocate large blocks
+    void* ptr = mmap(nullptr, size + sizeof(MallocMetadata),
+                     PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) {
+        return nullptr;
+    }
+
+    // Initialize metadata
+    Meta block = (Meta)ptr;
+    block->size = size;
+    block->is_free = false;
+    block->next = nullptr;
+    block->prev = nullptr;
+
+    // Add this block to the mmap'd blocks list (not necessarily sorted)
+    block_table.addLargeBlock(block);
+
+    // Return the pointer to the memory after the metadata
+    return (void*)(block + 1);
+}
+
+
+void largeFree(Meta block) {
+    // use munmap to free large blocks, assumes block is not nullptr
+    block_table.removeLargeBlock(block);
+    munmap(block, block->size + sizeof(MallocMetadata));
+}
+
+
+void Block_Table::addLargeBlock(Meta new_block) {
+    //no need to keep list sorted - put new block at head
+    if (mmap_head != nullptr) {
+        mmap_head->prev = new_block;
+    }
+    new_block->next = mmap_head;
+    mmap_head = new_block;
+    new_block->prev = nullptr;
+}
+
+
+void Block_Table::removeLargeBlock(Meta block) {
+    //remove block from list
+    if (block->prev) {
+        block->prev->next = block->next;
+    }
+    if (block->next) {
+        block->next->prev = block->prev;
+    }
+    if (mmap_head == block) {
+        mmap_head = block->next;
+    }
+}
 
 
