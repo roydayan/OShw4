@@ -8,7 +8,6 @@
 #include <unistd.h>
 #include <cstring> //for memmove
 #include <sys/mman.h> //for mmap
-#include <sys/mman.h>
 #include <iostream>
 #define MAX_SIZE 100000000  //10^8
 #define MAX_ORDER 10
@@ -48,7 +47,7 @@ private:
     Meta table[MAX_ORDER+1] = {nullptr}; //array of linked lists
     bool isInitialized = false;
 
-    Meta mmap_head = nullptr;
+    //Meta head = nullptr;
 
 public:
     size_t  num_free_block = 0;
@@ -92,13 +91,10 @@ public:
     bool checkNextBuddy(Meta block, int order);
     Meta mergeRemoveBuddies(Meta block1, Meta block2);
 
-    //large block methods
-    void addLargeBlock(Meta block);
-    void removeLargeBlock(Meta block);
 };
 
-void* largeAlloc(size_t size);
-void largeFree(Meta block);
+
+
 class MmapedList{
 private:
     MallocMetadata* head;
@@ -114,28 +110,13 @@ public:
     void removeBlock(Meta block);
 };
 
-
-void largeFree(void* p);
+void* largeAlloc(size_t size);
+void largeFree(Meta block);
 void* largeRealloc(void* oldp, size_t size);
 
 
 Block_Table block_table = Block_Table();
 MmapedList mmaped_list = MmapedList();
-
-void* largeAlloc(size_t size){
-    void* block = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ|PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    long long block_long = (long long) block;
-    if( block_long == -1){
-        return nullptr;
-    }
-
-    Meta block_meta = (Meta)(block);
-    *block_meta = {size, block_meta->block_size ,false, nullptr, nullptr};
-
-    mmaped_list.insertBlock(block_meta);
-    return (void*) (block_meta+1);
-
-}
 
 
 void* smalloc(size_t size) {
@@ -403,12 +384,14 @@ void Block_Table::freeBlock(Meta block) {
     while (BLOCK_SIZE(order) - sizeof(MallocMetadata) < block->size) {
         order++;
     }
+    block->is_free = true;
     recurseMergeFree(block, order);
 }
 
 
 void Block_Table::recurseMergeFree(Meta block, int order) {
     insertBlockIntoList(block, order);
+    block->block_size = BLOCK_SIZE(order);
     if (order == MAX_ORDER) { //no merging in max order
         return;
     }
@@ -485,7 +468,7 @@ Meta Block_Table::mergeRemoveBuddies(Meta block1, Meta block2) { //block 1 is pr
     //assumes blocks are not nullptr
     Meta new_block = block1; //prev and is_free are already supposed to be set
     //new_block->size = (block1->size * 2); //size should still be 0 in free block
-    //new_block->is_free = true;
+    new_block->is_free = true;
     new_block->next = nullptr;
     new_block->prev = nullptr;
 
@@ -505,27 +488,21 @@ Meta Block_Table::mergeRemoveBuddies(Meta block1, Meta block2) { //block 1 is pr
 //large block methods
 //-------------------------------------------------------------
 
-void* largeAlloc(size_t size) {
-    // use mmap to allocate large blocks
-    void *ptr = mmap(nullptr, size + sizeof(MallocMetadata),
-                     PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (ptr == MAP_FAILED) {
+void* largeAlloc(size_t size){
+    void* block = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ|PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    long long block_long = (long long) block;
+    if( block_long == -1){
         return nullptr;
     }
 
-    // Initialize metadata
-    Meta block = (Meta) ptr;
-    block->size = size;
-    block->is_free = false;
-    block->next = nullptr;
-    block->prev = nullptr;
+    Meta block_meta = (Meta)(block);
+    *block_meta = {size, block_meta->block_size ,false, nullptr, nullptr};
 
-    // Add this block to the mmap'd blocks list (not necessarily sorted)
-    block_table.addLargeBlock(block);
+    mmaped_list.insertBlock(block_meta);
+    return (void*) (block_meta+1);
 
-    // Return the pointer to the memory after the metadata
-    return (void*)(block + 1);
 }
+
 
 Meta Block_Table::mergeBlocksToFitSize(Meta block, size_t desired_size){
     //no need to merge further
@@ -583,72 +560,17 @@ void Block_Table::removeFromList(Meta block, int order){
 
 }
 
-void Block_Table::insertBlockIntoList(Meta block, int order) {
-    //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
-    // If the list is empty, insert the block as the first element
-    if (table[order] == nullptr) {
-        table[order] = block;
-        block->next = nullptr;
-        block->prev = nullptr;
-        return;
-    }
-
-    Meta current = table[order];
-
-    // Traverse the list to find the correct position to insert the block
-    while (current != nullptr && current < block) {
-        current = current->next;
-    }
-
-    // Inserting at the end of the list
-    if (current == nullptr) {
-        Meta last = table[order];
-        while (last->next != nullptr) {
-            last = last->next;
-        }
-        last->next = block;
-        block->prev = last;
-        block->next = nullptr;
-        return;
-    }
-
-    // Inserting at the beginning of the list
-    if (current == table[order]) {
-        block->next = table[order];
-        block->prev = nullptr;
-        table[order]->prev = block;
-        table[order] = block;
-        return;
-    }
-
-    // Inserting in the middle of the list
-    Meta prevBlock = current->prev;
-    prevBlock->next = block;
-    block->prev = prevBlock;
-    block->next = current;
-    current->prev = block;
-}
-
 
 void largeFree(Meta block) {
     // use munmap to free large blocks, assumes block is not nullptr
-    block_table.removeLargeBlock(block);
+    mmaped_list.removeBlock(block);
     munmap(block, block->size + sizeof(MallocMetadata));
+
+    //TODO - update stats!!!!!!!!!!!!!!
 }
 
 
-void Block_Table::addLargeBlock(Meta new_block) {
-    //no need to keep list sorted - put new block at head
-    if (mmap_head != nullptr) {
-        mmap_head->prev = new_block;
-    }
-    new_block->next = mmap_head;
-    mmap_head = new_block;
-    new_block->prev = nullptr;
-}
-
-
-void Block_Table::removeLargeBlock(Meta block) {
+void MmapedList::removeBlock(Meta block) {
     //remove block from list
     if (block->prev) {
         block->prev->next = block->next;
@@ -656,18 +578,12 @@ void Block_Table::removeLargeBlock(Meta block) {
     if (block->next) {
         block->next->prev = block->prev;
     }
-    if (mmap_head == block) {
-        mmap_head = block->next;
+    if (head == block) {
+        head = block->next;
     }
+    block->is_free = true;
 }
 
-
-
-
-
-//-------------------------------------------------------------
-//MmapedList methods
-//-------------------------------------------------------------
 
 void MmapedList::insertBlock(Meta block){
     if(head == nullptr){
@@ -683,28 +599,8 @@ void MmapedList::insertBlock(Meta block){
     head = block;
     return;
 }
-void MmapedList::removeBlock(Meta block){
-    if(head == nullptr){
-        return;
-    }
-    if(block == head){
-        head = head->next;
-        block->next = nullptr;
-        block->prev = nullptr;
-        block->is_free = true;
-        return;
-    }
 
-    block->prev->next = block->next;
 
-    if(block->next != nullptr){
-        block->next->prev = block->prev;
-    }
-    block->next = nullptr;
-    block->prev = nullptr;
-    block->is_free = true;
-    return;
-}
 
 
 
