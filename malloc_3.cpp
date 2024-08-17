@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <cstring> //for memmove
 #include <sys/mman.h> //for mmap
+#include <sys/mman.h>
+#include <iostream>
 #define MAX_SIZE 100000000  //10^8
 #define MAX_ORDER 10
 #define INIT_ALLOC (128*1024*32) //128KB * 32 = 4MB
@@ -18,8 +20,21 @@
 
 //TODO- implement malloc_3 - this is copy of malloc_2!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+//this does log2(size//2^7)
+int getOrder(size_t size){
+    int order = 0;
+    size = size >> 8; //deviding by 2^7
+    while (size != 0){
+        size >> 1;
+        order++;
+    }
+    return order;
+
+}
+
 typedef struct MallocMetadata {
     size_t size;
+    size_t block_size;
     bool is_free;
     MallocMetadata* next;
     MallocMetadata* prev;
@@ -36,19 +51,43 @@ private:
     Meta mmap_head = nullptr;
 
 public:
+    size_t  num_free_block = 0;
+    size_t num_free_bytes = 0;
+    size_t num_allocated_blocks = 0;
+    size_t num_meta_data_bytes = 0;
 
     Block_Table() : table() {};
     void initTable();
 
 
     void* getAvailableBlock(size_t size);
-    void* findBlockGivenOrder(int order);
-    void* recurseSplitAlloc(size_t size, int order);
+
+    //trys to merge block with buddies to obtain a block with size big enough to fit , if not found returns nullptr
+    Meta tryRealocUsingSameBlock(Meta block, size_t desired_size);
+
+    Meta mergeBlocksToFitSize(Meta block, size_t desired_size);
+
+    void* findBlockGivenOrder(int order); //TODO - EASY, check addresses when finding place in list
+
+    Meta recurseSplitAlloc(size_t size, int order, Meta block);
+
+    void* splitAlloc(size_t size, int order);
+
     void freeBlock(Meta block);
+
+    void recurseSplitFree(Meta block);
+
+    void insertBlockIntoList(Meta block, int order);
+
+    void removeFromList(Meta block , int order);
+
+    //bool checkBuddies(Meta block1, Meta block2);
+    //Meta mergeBuddies(Meta block1, Meta block2);
+    //Meta splitBlock(Meta block, int order);
+
     void recurseMergeFree(Meta block, int order);
 
     //helper funcs:
-    void insertBlockIntoList(Meta block, int order); //inserts block into list corresponding to order
     bool checkPrevBuddy(Meta block, int order);
     bool checkNextBuddy(Meta block, int order);
     Meta mergeRemoveBuddies(Meta block1, Meta block2);
@@ -60,17 +99,52 @@ public:
 
 void* largeAlloc(size_t size);
 void largeFree(Meta block);
+class MmapedList{
+private:
+    MallocMetadata* head;
 
 
+public:
+    size_t  num_free_block = 0;
+    size_t num_free_bytes = 0;
+    size_t num_allocated_blocks = 0;
+    size_t num_meta_data_bytes = 0;
+    MmapedList():head(nullptr){}
+    void insertBlock(Meta block);
+    void removeBlock(Meta block);
+};
 
-Block_Table block_table;
+
+void largeFree(void* p);
+void* largeRealloc(void* oldp, size_t size);
+
+
+Block_Table block_table = Block_Table();
+MmapedList mmaped_list = MmapedList();
+
+void* largeAlloc(size_t size){
+    void* block = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ|PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    long long block_long = (long long) block;
+    if( block_long == -1){
+        return nullptr;
+    }
+
+    Meta block_meta = (Meta)(block);
+    *block_meta = {size, block_meta->block_size ,false, nullptr, nullptr};
+
+    mmaped_list.insertBlock(block_meta);
+    return (void*) (block_meta+1);
+
+}
 
 
 void* smalloc(size_t size) {
+    block_table.initTable();//does nothing if already initialized
+
     if (size == 0) {
         return nullptr; //Note - this is .cpp file, so I am using nullptr instead of NULL
     }
-    if (size + sizeof(MallocMetadata) >= BLOCK_SIZE(MAX_ORDER)) {
+    if (size+sizeof(MallocMetadata) >= BLOCK_SIZE(MAX_ORDER)) {
         return largeAlloc(size);
     }
     return block_table.getAvailableBlock(size);
@@ -115,24 +189,50 @@ void* srealloc(void* oldp, size_t size) {
         return smalloc(size);
     }
 
+    if( size+sizeof(MallocMetadata) >= BLOCK_SIZE(MAX_ORDER) ){
+        return largeRealloc(oldp, size);
+    }
+
     Meta old_block = (Meta)oldp - 1;
     if (old_block->size >= size) {
         return oldp;
     }
 
-    void* newp = smalloc(size);
-    if (!newp) {
-        return nullptr; //in this case the old block is still valid
+    void* newp;
+    Meta new_block = block_table.tryRealocUsingSameBlock(old_block ,size);
+
+    if(new_block != nullptr){
+        newp = (void*)(new_block+1);
+        std::memmove(newp, oldp, old_block->size);
+    }
+    else{
+        newp = smalloc(size);
+        if(newp == nullptr) return nullptr;
+
+        std::memmove(newp, oldp, old_block->size);
+        sfree(oldp);
     }
 
-    // Copy the data from oldp to newp
-    std::memmove(newp, oldp, old_block->size);
-    sfree(oldp);
-
-    // Note: old block freed only if realloc was successful!!!!!!!!!!!!!!!!!!!!!!!
     return newp;
 }
 
+void* largeRealloc(void* oldp, size_t size){
+
+    if(oldp == nullptr){//should'nt happen
+        return smalloc(size);
+    }
+
+    Meta old_block =  ( (Meta)(oldp) ) - 1;
+    if(old_block->size == size){
+        return oldp;
+    }
+
+    void* newp = smalloc(size);//will call mmap because size > 128kb
+    std::memmove(newp, oldp, old_block->size);
+    sfree(oldp);//will call munmap
+
+    return newp;
+}
 
 
 //-------------------------------------------------------------
@@ -166,7 +266,8 @@ void Block_Table::initTable() {
     size_t index = (size_t)memory_start;
     for (int i = 0; i < INIT_NUM_BLOCKS; i++) {
         Meta new_block = (Meta)index;
-        new_block->size = BLOCK_SIZE(MAX_ORDER);
+        new_block->size = BLOCK_SIZE(MAX_ORDER) - sizeof(MallocMetadata);
+        new_block->block_size = BLOCK_SIZE(MAX_ORDER);
         new_block->is_free = true;
         new_block->next = nullptr;
         new_block->prev = nullptr;
@@ -196,34 +297,29 @@ void* Block_Table::getAvailableBlock(size_t size) {
         order++;
     }
     if (order > MAX_ORDER) {
-        return nullptr; // Note: not supposed to reach this b/c if size >= BLOCK_SIZE(MAX_ORDER), largeAlloc will be called
+        return nullptr; // Note: not supposed to reach this b/c if size >= MAX_SIZE, largeAlloc will be called
     }
     // check if there is a free block of the right size (no need to split) allocate as before
     if (table[order]) {
-        return findBlockGivenOrder(order);
+        //TODO-- fix this: findBlockGivenOrder should return Meta
+        Meta found_block = ((Meta)findBlockGivenOrder(order) - 1);
+        found_block->size = size;
+        return (void*)(found_block+1);
     }
     else { //no free block of right size
         // Find the tightest fit block
         for (int current_order = order + 1; current_order <= MAX_ORDER; current_order++) {
             if (table[current_order]) {
-                return recurseSplitAlloc(size, current_order);
+                return splitAlloc(size, current_order);
             }
         }
     }
+    //TODO-- do we need to return null? or just allocate using mmap?
     return nullptr;
 }
 
-
 void* Block_Table::findBlockGivenOrder(int order) {
     Meta curr = table[order];
-    while (curr) {
-        if (curr->is_free) {
-            curr->is_free = false;
-            break;
-            //TODO - should we check free or just return the first non-null block??????????
-        }
-        curr = curr->next;
-    }
     //remove block from table
     if (curr->prev) {
         curr->prev->next = curr->next;
@@ -234,37 +330,73 @@ void* Block_Table::findBlockGivenOrder(int order) {
     if (table[order] == curr) {
         table[order] = curr->next;
     }
+
     return (void*)(curr + 1);
 }
 
+void* Block_Table::splitAlloc(size_t size, int order){
+    //Removing first block in table[order]
+    Meta curr_block = this->table[order];
+    if(curr_block->next != nullptr){
+        curr_block->next->prev = nullptr;
+    }
+    this->table[order] = curr_block->next;
 
-void* Block_Table::recurseSplitAlloc(size_t size, int order) {
+    //splitting block
+    Meta allocated_block = recurseSplitAlloc(size, order, curr_block);
+    return (void*)(allocated_block+1);
+}
 
-    //TODO - implement!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-    Meta curr = table[order];
-    while (curr) {
-        if (curr->is_free) {
-            curr->is_free = false;
-            size_t new_block_size = BLOCK_SIZE(order);
-            //TODO - split!!!!
+Meta Block_Table::recurseSplitAlloc(size_t size, int order, Meta block) {
+    //block is not "large enough"
+    if(order == 0 || size+sizeof(MallocMetadata) > BLOCK_SIZE(order-1) ){
+        *block = {size, static_cast<size_t>(BLOCK_SIZE(order)),false, nullptr, nullptr};
+        return block;
+    }
+
+    //split
+    size_t size_after_split = static_cast<size_t> (BLOCK_SIZE(order-1));
+
+    Meta allocated_block = block;
+    *allocated_block = {size_after_split,size_after_split ,true, nullptr, nullptr};
+
+    Meta free_block = (Meta) ( ( static_cast<char *>( (void*)block) ) + BLOCK_SIZE(order-1) );
+    *free_block = {size_after_split, size_after_split ,true, nullptr , nullptr};
+
+    insertBlockIntoList(free_block, order-1);
+
+    return recurseSplitAlloc(size, order-1, allocated_block);
+
+}
+
+Meta Block_Table::tryRealocUsingSameBlock(Meta block, size_t desired_size){
+    if(block->block_size >= desired_size + sizeof(MallocMetadata)){
+        block->size = desired_size;
+        return block;
+    }
+
+    //calculating if block could be merged to fit desired_size
+    Meta merged_block = block;
+    size_t merged_block_size = block->block_size;
+    while ( merged_block_size < BLOCK_SIZE(MAX_ORDER) ){
+        long long base_addr = (long long) merged_block;
+        Meta buddy = (Meta) ( base_addr ^ ( (long long)(merged_block_size) ) );
+
+        if(!buddy->is_free){
+            return nullptr;
+        }
+        merged_block = (merged_block < buddy) ? merged_block : buddy;
+        merged_block_size = merged_block_size *2;
+
+        //block could be merged to fit desired_size. perform the merges
+        if(merged_block_size >= desired_size + sizeof(MallocMetadata)){
+            return mergeBlocksToFitSize(block, desired_size);
         }
     }
-    //remove block from table
-    if (curr->prev) {
-        curr->prev->next = curr->next;
-    }
-    if (curr->next) {
-        curr->next->prev = curr->prev;
-    }
-    if (table[order] == curr) {
-        table[order] = curr->next;
-    }
-    return (void*)(curr + 1);
+    return nullptr;
 
 }
-
-
 void Block_Table::freeBlock(Meta block) {
     // assumes not nullptr. size < BLOCK_SIZE(MAX_ORDER) b/c large blocks are handled separately
     int order = 0;
@@ -375,14 +507,14 @@ Meta Block_Table::mergeRemoveBuddies(Meta block1, Meta block2) { //block 1 is pr
 
 void* largeAlloc(size_t size) {
     // use mmap to allocate large blocks
-    void* ptr = mmap(nullptr, size + sizeof(MallocMetadata),
+    void *ptr = mmap(nullptr, size + sizeof(MallocMetadata),
                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
         return nullptr;
     }
 
     // Initialize metadata
-    Meta block = (Meta)ptr;
+    Meta block = (Meta) ptr;
     block->size = size;
     block->is_free = false;
     block->next = nullptr;
@@ -393,6 +525,108 @@ void* largeAlloc(size_t size) {
 
     // Return the pointer to the memory after the metadata
     return (void*)(block + 1);
+}
+
+Meta Block_Table::mergeBlocksToFitSize(Meta block, size_t desired_size){
+    //no need to merge further
+    if(block->block_size >= desired_size+ sizeof(MallocMetadata)){
+        return block;
+    }
+    //cannot merge any more (shouldnt happen if called by tryRealloc...)
+    if(block->block_size == BLOCK_SIZE(MAX_ORDER) ){
+        return nullptr;
+    }
+
+    //find buddy
+    long long base_addr = (long long)(block);
+    Meta buddy = (Meta) (base_addr ^ (long long)(block->block_size));
+
+    //ensure buddy and block can be merged (shouldnt happen if called by tryRealloc...)
+    if(!buddy->is_free){
+        return nullptr;
+    }
+
+    //remove buddy from free list
+    removeFromList(buddy, getOrder(buddy->block_size));
+
+    //merge block and buddy
+    Meta merged_block = (block < buddy) ? block : buddy;
+    merged_block->is_free = false;
+    merged_block->size = desired_size;
+    merged_block->block_size = 2 * block->block_size;
+    merged_block->next = nullptr;
+    merged_block->prev = nullptr;
+
+    //keep on merging
+    return mergeBlocksToFitSize(merged_block, desired_size);
+
+}
+
+void Block_Table::removeFromList(Meta block, int order){
+    if(order > MAX_ORDER || table[order] == nullptr){//should'nt happen
+        return;
+    }
+
+    if(table[order] == block){
+        table[order] = block->next;
+    }
+    if(block->prev != nullptr){
+        block->prev->next = block->next;
+    }
+    if(block->next != nullptr){
+        block->next->prev = block->prev;
+    }
+
+    block->next, block->prev = nullptr;
+    block->is_free = false;
+    return;
+
+}
+
+void Block_Table::insertBlockIntoList(Meta block, int order) {
+    //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
+    // If the list is empty, insert the block as the first element
+    if (table[order] == nullptr) {
+        table[order] = block;
+        block->next = nullptr;
+        block->prev = nullptr;
+        return;
+    }
+
+    Meta current = table[order];
+
+    // Traverse the list to find the correct position to insert the block
+    while (current != nullptr && current < block) {
+        current = current->next;
+    }
+
+    // Inserting at the end of the list
+    if (current == nullptr) {
+        Meta last = table[order];
+        while (last->next != nullptr) {
+            last = last->next;
+        }
+        last->next = block;
+        block->prev = last;
+        block->next = nullptr;
+        return;
+    }
+
+    // Inserting at the beginning of the list
+    if (current == table[order]) {
+        block->next = table[order];
+        block->prev = nullptr;
+        table[order]->prev = block;
+        table[order] = block;
+        return;
+    }
+
+    // Inserting in the middle of the list
+    Meta prevBlock = current->prev;
+    prevBlock->next = block;
+    block->prev = prevBlock;
+    block->next = current;
+    current->prev = block;
 }
 
 
@@ -428,8 +662,122 @@ void Block_Table::removeLargeBlock(Meta block) {
 }
 
 
+
+
+
+//-------------------------------------------------------------
+//MmapedList methods
+//-------------------------------------------------------------
+
+void MmapedList::insertBlock(Meta block){
+    if(head == nullptr){
+        head = block;
+        head->next = nullptr;
+        head->prev = nullptr;
+        return;
+    }
+    head->prev = block;
+    block->next = head;
+    block->prev = nullptr;
+    block->is_free = false;
+    head = block;
+    return;
+}
+void MmapedList::removeBlock(Meta block){
+    if(head == nullptr){
+        return;
+    }
+    if(block == head){
+        head = head->next;
+        block->next = nullptr;
+        block->prev = nullptr;
+        block->is_free = true;
+        return;
+    }
+
+    block->prev->next = block->next;
+
+    if(block->next != nullptr){
+        block->next->prev = block->prev;
+    }
+    block->next = nullptr;
+    block->prev = nullptr;
+    block->is_free = true;
+    return;
+}
+
+
+
+
+
+//int main(){
+//    char* p = (char*) smalloc(BLOCK_SIZE(MAX_ORDER) - sizeof(MallocMetadata) -1);
+//    p[0] = 'a';
+//    p[1] = 'b';
+//    p[2] = '\0';
+//    std::cout<<p<<std::endl;
+//    return  0;
+//}
 int main() {
-    block_table.initTable();
-    int* ptr = (int*)smalloc(1000);
+    int i = 100;
+    void* ptr = smalloc(i*sizeof(int) );
+    void* ptrFAIL1 = smalloc(MAX_SIZE+10);
+    void *ptrFAIL2 = smalloc(0);
+    if (ptr == nullptr) {
+        return 1;
+    }
+    int *int_arr = (int*)ptr;
+    int x = int_arr[0];
+    int y = int_arr[i-1];
+    for (int j = 0; j < i; j++) {
+        int_arr[j] = j;
+    }
+    int z = int_arr[i-1];
+    if (y == z) { //make sure value changed
+        return 2;
+    }
+
+    //try allocating a bunch of new blocks
+    for (int q = 3; q < 10; q++) {
+        void* ptr1 = smalloc(MAX_SIZE-1000);
+        if (ptr1 == nullptr) {
+            return q;
+        }
+    }
+    //try allocating a bunch of new blocks and write into them
+    for (int r = 11; r < 1000; r++) {
+        void* ptr3 = smalloc(MAX_SIZE-1000);
+        if (ptr3 == nullptr) {
+            return r;
+        }
+        int *new_arr = (int*)ptr3;
+        //write into arr
+        new_arr[10000] = 1;
+    }
+
+    //test calloc
+    void* ptr4 = scalloc(100, sizeof(int));
+    if (ptr4 == nullptr) {
+        return 100;
+    }
+    int* int_arr2 = (int*)ptr4;
+    for (int j = 0; j < 100; j++) {
+        if (int_arr2[j] != 0) {
+            return 101;
+        }
+    }
+
+    //test realloc
+    void* ptr5 = srealloc(ptr4, 1000*sizeof(int));
+    if (ptr5 == nullptr) {
+        return 102;
+    }
+    int* int_arr3 = (int*)ptr5;
+    for (int j = 0; j < 100; j++) {
+        if (int_arr3[j] != 0) {
+            return 103;
+        }
+    }
+
     return 0;
 }
