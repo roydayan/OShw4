@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <cstring> //for memmove
 #include <sys/mman.h>
+#include <iostream>
 #define MAX_SIZE 100000000  //10^8
 #define MAX_ORDER 10
 #define INIT_ALLOC (128*1024*32) //128KB * 32 = 4MB
@@ -48,6 +49,10 @@ private:
     bool isInitialized = false;
 
 public:
+    size_t  num_free_block = 0;
+    size_t num_free_bytes = 0;
+    size_t num_allocated_blocks = 0;
+    size_t num_meta_data_bytes = 0;
 
     Block_Table() : table() {};
     void initTable();
@@ -82,7 +87,13 @@ public:
 class MmapedList{
 private:
     MallocMetadata* head;
+
+
 public:
+    size_t  num_free_block = 0;
+    size_t num_free_bytes = 0;
+    size_t num_allocated_blocks = 0;
+    size_t num_meta_data_bytes = 0;
     MmapedList():head(nullptr){}
     void insertBlock(Meta block);
     void removeBlock(Meta block);
@@ -97,7 +108,7 @@ Block_Table block_table = Block_Table();
 MmapedList mmaped_list = MmapedList();
 
 void* largeAlloc(size_t size){
-    void* block = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ|PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+    void* block = mmap(NULL, size+sizeof(MallocMetadata), PROT_READ|PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     long long block_long = (long long) block;
     if( block_long == -1){
         return nullptr;
@@ -113,6 +124,8 @@ void* largeAlloc(size_t size){
 
 
 void* smalloc(size_t size) {
+    block_table.initTable();//does nothing if already initialized
+
     if (size == 0) {
         return nullptr; //Note - this is .cpp file, so I am using nullptr instead of NULL
     }
@@ -262,6 +275,11 @@ void Block_Table::initTable() {
         }
         index += BLOCK_SIZE(MAX_ORDER);
     }
+    Meta curr = table[MAX_ORDER];
+//    while(curr != nullptr){
+//        std::cout<<"prev: "<<curr->prev<<"curr: "<<curr<<"next: "<<curr->next<<std::endl;
+//        curr = curr -> next;
+//    }
 }
 
 void* Block_Table::getAvailableBlock(size_t size) {
@@ -293,13 +311,13 @@ void* Block_Table::getAvailableBlock(size_t size) {
 
 void* Block_Table::findBlockGivenOrder(int order) {
     Meta curr = table[order];
-    while (curr) {
-        if (curr->is_free) {
-            curr->is_free = false;
-            break;
-        }
-        curr = curr->next;
-    }
+//    while (curr) {
+//        if (curr->is_free) {
+//            curr->is_free = false;
+//            break;
+//        }
+//        curr = curr->next;
+//    }
     //remove block from table
     if (curr->prev) {
         curr->prev->next = curr->next;
@@ -317,8 +335,8 @@ void* Block_Table::findBlockGivenOrder(int order) {
 void* Block_Table::splitAlloc(size_t size, int order){
     //Removing first block in table[order]
     Meta curr_block = this->table[order];
-    if(curr_block->next != NULL){
-        curr_block->next->prev = NULL;
+    if(curr_block->next != nullptr){
+        curr_block->next->prev = nullptr;
     }
     this->table[order] = curr_block->next;
 
@@ -330,8 +348,8 @@ void* Block_Table::splitAlloc(size_t size, int order){
 
 Meta Block_Table::recurseSplitAlloc(size_t size, int order, Meta block) {
     //block is not "large enough"
-    if(order == 0 || size+sizeof(MallocMetadata) > BLOCK_SIZE(order) ){
-        *block = {size, static_cast<size_t>(BLOCK_SIZE(order)),false, NULL, NULL};
+    if(order == 0 || size+sizeof(MallocMetadata) > BLOCK_SIZE(order-1) ){
+        *block = {size, static_cast<size_t>(BLOCK_SIZE(order)),false, nullptr, nullptr};
         return block;
     }
 
@@ -339,10 +357,10 @@ Meta Block_Table::recurseSplitAlloc(size_t size, int order, Meta block) {
     size_t size_after_split = static_cast<size_t> (BLOCK_SIZE(order-1));
 
     Meta allocated_block = block;
-    *allocated_block = {size_after_split,size_after_split ,true, NULL, NULL};
+    *allocated_block = {size_after_split,size_after_split ,true, nullptr, nullptr};
 
     Meta free_block = (Meta) ( ( static_cast<char *>( (void*)block) ) + BLOCK_SIZE(order-1) );
-    *free_block = {size_after_split, size_after_split ,true, NULL , NULL};
+    *free_block = {size_after_split, size_after_split ,true, nullptr , nullptr};
 
     insertBlockIntoList(free_block, order-1);
 
@@ -436,38 +454,114 @@ void Block_Table::removeFromList(Meta block, int order){
 
 void Block_Table::insertBlockIntoList(Meta block, int order) {
     //insert new block last in list b/c we want to keep the list sorted in addresses (and update data)
+    // If the list is empty, insert the block as the first element
     if (table[order] == nullptr) {
         table[order] = block;
-        block->prev = nullptr;
         block->next = nullptr;
+        block->prev = nullptr;
+        return;
     }
-    else if (block < table[order]) { //insert at beginning
+
+    Meta current = table[order];
+
+    // Traverse the list to find the correct position to insert the block
+    while (current != nullptr && current < block) {
+        current = current->next;
+    }
+
+    // Inserting at the end of the list
+    if (current == nullptr) {
+        Meta last = table[order];
+        while (last->next != nullptr) {
+            last = last->next;
+        }
+        last->next = block;
+        block->prev = last;
+        block->next = nullptr;
+        return;
+    }
+
+    // Inserting at the beginning of the list
+    if (current == table[order]) {
         block->next = table[order];
         block->prev = nullptr;
         table[order]->prev = block;
         table[order] = block;
+        return;
     }
-    else { //search place in list
-        Meta curr = table[order]->next;
-        while (curr) {
-            //insert if block has lower address
-            if (block < curr) {
-                block->next = curr;
-                block->prev = curr->prev;
-                curr->prev->next = block; // curr->prev != nullptr b/c we checked the head of list (table[order])
-                curr->prev = block;
-                break;
-            }
-                //if we reached last block, attach new block to end
-            else if (curr->next == nullptr) {
-                curr->next = block;
-                block->prev = curr;
-                break;
-            }
-            curr = curr->next;
-        }
-    }
+
+    // Inserting in the middle of the list
+    Meta prevBlock = current->prev;
+    prevBlock->next = block;
+    block->prev = prevBlock;
+    block->next = current;
+    current->prev = block;
 }
+
+
+
+
+
+
+
+
+
+
+//    if (table[order] == nullptr) {
+//        table[order] = block;
+//        block->prev = nullptr;
+//        block->next = nullptr;
+//        return;
+//    }
+//    Meta curr = table[order];
+//    while(curr != nullptr && curr < block){
+//        curr = curr -> next;
+//    }
+//    if(curr == nullptr){
+//        curr = table[order];
+//        while(curr->next != nullptr){
+//            curr = curr->next;
+//        }
+//        if(curr < block){
+//
+//        }
+//    }
+//    if(curr->prev != nullptr){
+//        curr->prev->next = block;
+//    }
+//    if(curr->next != nullptr){
+//        curr->next->prev = block;
+//    }
+//    if(curr == table[order]){
+//        table[order] = block;
+//    }
+//    else if (block < table[order]) { //insert at beginning
+//        block->next = table[order];
+//        block->prev = nullptr;
+//        table[order]->prev = block;
+//        table[order] = block;
+//    }
+//    else { //search place in list
+//        Meta curr = table[order]->next;
+//        while (curr) {
+//            //insert if block has lower address
+//            if (block < curr) {
+//                block->next = curr;
+//                block->prev = curr->prev;
+//                curr->prev->next = block; // curr->prev != nullptr b/c we checked the head of list (table[order])
+//                curr->prev = block;
+//                break;
+//            }
+//                //if we reached last block, attach new block to end
+//            else if (curr->next == nullptr) {
+//                curr->next = block;
+//                block->prev = curr;
+//                break;
+//            }
+//            curr = curr->next;
+//        }
+//    }
+
 
 
 //-------------------------------------------------------------
@@ -515,7 +609,74 @@ void MmapedList::removeBlock(Meta block){
 
 
 
-int main(){
-    //void* p = smalloc()
-    return  0;
+//int main(){
+//    char* p = (char*) smalloc(BLOCK_SIZE(MAX_ORDER) - sizeof(MallocMetadata) -1);
+//    p[0] = 'a';
+//    p[1] = 'b';
+//    p[2] = '\0';
+//    std::cout<<p<<std::endl;
+//    return  0;
+//}
+int main() {
+    int i = 100;
+    void* ptr = smalloc(i*sizeof(int) );
+    void* ptrFAIL1 = smalloc(MAX_SIZE+10);
+    void *ptrFAIL2 = smalloc(0);
+    if (ptr == nullptr) {
+        return 1;
+    }
+    int *int_arr = (int*)ptr;
+    int x = int_arr[0];
+    int y = int_arr[i-1];
+    for (int j = 0; j < i; j++) {
+        int_arr[j] = j;
+    }
+    int z = int_arr[i-1];
+    if (y == z) { //make sure value changed
+        return 2;
+    }
+
+    //try allocating a bunch of new blocks
+    for (int q = 3; q < 10; q++) {
+        void* ptr1 = smalloc(MAX_SIZE-1000);
+        if (ptr1 == nullptr) {
+            return q;
+        }
+    }
+    //try allocating a bunch of new blocks and write into them
+    for (int r = 11; r < 1000; r++) {
+        void* ptr3 = smalloc(MAX_SIZE-1000);
+        if (ptr3 == nullptr) {
+            return r;
+        }
+        int *new_arr = (int*)ptr3;
+        //write into arr
+        new_arr[10000] = 1;
+    }
+
+    //test calloc
+    void* ptr4 = scalloc(100, sizeof(int));
+    if (ptr4 == nullptr) {
+        return 100;
+    }
+    int* int_arr2 = (int*)ptr4;
+    for (int j = 0; j < 100; j++) {
+        if (int_arr2[j] != 0) {
+            return 101;
+        }
+    }
+
+    //test realloc
+    void* ptr5 = srealloc(ptr4, 1000*sizeof(int));
+    if (ptr5 == nullptr) {
+        return 102;
+    }
+    int* int_arr3 = (int*)ptr5;
+    for (int j = 0; j < 100; j++) {
+        if (int_arr3[j] != 0) {
+            return 103;
+        }
+    }
+
+    return 0;
 }
